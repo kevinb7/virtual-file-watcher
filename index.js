@@ -1,5 +1,4 @@
 var watch = require('./lib/watch.js');
-var File = require('./lib/file.js');
 
 var actions = require('./lib/actions.js');
 var compile = actions.compile;
@@ -15,12 +14,12 @@ var sourcePaths = [
     'example/src/test2.js'
 ];
 
-watch(sourcePaths, { debug: true, once: false })
+watch(sourcePaths, { debug: true, once: true })
     .transform(compile({
         compiler: function (code) { return babel.transform(code).code },
         regex: /^example\/src/
     }))
-    .transform(concat(sourcePaths, 'example/build/bundle.js'))
+    .transform(concat('example/build/bundle.js'))
     .transform(write)
     .transform(log)
     .transform(minify)
@@ -31,3 +30,5 @@ watch(sourcePaths, { debug: true, once: false })
 // TODO: run tests
 // TODO: add newer... check all sources including deps
 // TODO: make reporting compiler errors more general, try this with TypeScript
+// TODO: validate specified paths
+// TODO: what about globs? turn them into an array of full specified paths
