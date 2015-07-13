@@ -1,5 +1,4 @@
 var fs = require('fs');
-var EventEmitter = require('events').EventEmitter;
 var Rx = require('rx');
 var _ = require('lodash');
 var chokidar = require('chokidar');
@@ -17,33 +16,29 @@ function watch(paths, options) {
     options = options || {};
     debug = !!options.debug;
 
-    var ee = new EventEmitter();
     var watcher = chokidar.watch(paths, {
         ignored: /[\/\\]\./, persistent: true
     });
 
-    var observable = Rx.Observable.fromEventPattern(
-        function addHandler (h) {
-            ee.on("update", h);
-        },
-        function delHandler (h) {
-            ee.removeListener("update", h);
-        });
+    return Rx.Observable.create(function (obs) {
+        var listener = function (path) {
+            fs.readFile(path, function(err, data) {
+                if (err) {
+                    console.error(err);
+                    return;
+                }
+                obs.onNext(new File(path, data.toString('utf-8')));
+            });
+        };
 
-    var update = function(path) {
-        fs.readFile(path, function(err, data) {
-            if (err) {
-                console.error(err);
-                return;
-            }
-            ee.emit("update", new File(path, data.toString('utf-8')));
-        });
-    };
+        watcher.on('add', listener);
+        watcher.on('update', listener);
 
-    watcher.on('add', update);
-    watcher.on('change', update);
-
-    return observable;
+        return function() {
+            watcher.close();
+            process.exit(0);
+        };
+    });
 }
 
 Rx.Observable.prototype.transform = function(fn) {
@@ -58,7 +53,9 @@ Rx.Observable.prototype.transform = function(fn) {
 };
 
 Rx.Observable.prototype.end = function() {
-    this.subscribe(function() {});
+    return this.subscribe(function() {}, function() {}, function () {
+        process.exit();
+    });
 };
 
 function compile(options) {
@@ -94,15 +91,13 @@ function concat(paths, dest) {
 
 function log(file) {
     console.log("wrote " + file.path);
+    console.log(file.contents);
     return file;
 }
 
 function write(file) {
-    fs.writeFile(file.path, file.contents, function (err) {
-        if (err) {
-            console.log(err);
-        }
-    });
+    // TODO return an observable and then flatMap it
+    fs.writeFileSync(file.path, file.contents);
     return file;
 }
 
@@ -116,6 +111,8 @@ watch(sourcePaths, { debug: true })
     .transform(concat(sourcePaths, "example/build/bundle.js"))
     .transform(log)
     .transform(write)
+    .take(1)
     .end();
 
 // TODO: run tests
+// TODO: quit if anything errors when options.once = true;
