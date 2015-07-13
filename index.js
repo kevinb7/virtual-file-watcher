@@ -1,112 +1,131 @@
-var util = require('util');
-var EventEmitter = require('events').EventEmitter;
 var fs = require('fs');
+var EventEmitter = require('events').EventEmitter;
+var Rx = require('rx');
+var _ = require('lodash');
 var chokidar = require('chokidar');
 var babel = require('babel-core');
 
-var watcher = chokidar.watch('test/src', {
-    ignored: /[\/\\]\./, persistent: true
-});
 
-var log = console.log.bind(console);
-
-function RealFile(path) {
+function File(path, contents) {
     this.path = path;
-    this.content = null;
-    fs.readFile(path, function(err, data) {
-        this.content = data.toString('utf-8');
-        this.emit("update", this);
-    }.bind(this));
+    this.contents = contents;
 }
 
-util.inherits(RealFile, EventEmitter);
+function watch(dir) {
+    var ee = new EventEmitter();
+    var watcher = chokidar.watch(dir, {
+        ignored: /[\/\\]\./, persistent: true
+    });
 
-RealFile.prototype.update = function() {
-    fs.readFile(this.path, function(err, data) {
-        this.content = data.toString('utf-8');
-        this.emit("update", this);
-    }.bind(this));
-};
+    var observable = Rx.Observable.fromEventPattern(
+        function addHandler (h) {
+            ee.on("update", h);
+        },
+        function delHandler (h) {
+            ee.removeListener("update", h);
+        });
 
-RealFile.prototype.read = function() {
-    if (!this.content) {
-        this.content = fs.readFileSync(this.path);
-    }
-    return this.content;
-};
-
-var realFiles = {};
-var paths = ["test/src/test1.js", "test/src/test2.js"];
-paths.forEach(function (path) {
-    realFiles[path] = new RealFile(path);
-});
-
-function VirtualFile(sources, update) {
-    this.sources = sources;
-    this.content = null;
-    var _this = this;
-    var callback = function(content) {
-        _this.content = content;
-        _this.emit("update", _this);
-    };
-    sources.forEach(function (source) {
-        source.on("update", function (source) {
-            update(_this, source, callback);
+    watcher.on('add', function(path) {
+        fs.readFile(path, function(err, data) {
+            if (err) {
+                console.error(err);
+                return;
+            }
+            ee.emit("update", new File(path, data.toString('utf-8')));
         });
     });
+
+    watcher.on('change', function(path) {
+        fs.readFile(path, function(err, data) {
+            if (err) {
+                console.error(err);
+                return;
+            }
+            ee.emit("update", new File(path, data.toString('utf-8')));
+        });
+    });
+
+    return observable;
 }
 
-// TODO: add a process method that returns another instance which is automatically listening to the source
+var watcher = watch('example/src');
+var sourcePaths = [
+    'example/src/test1.js',
+    'example/src/test2.js'
+];
 
-util.inherits(VirtualFile, EventEmitter);
+function pick(files) {
+    return function (file) {
+        return files.indexOf(file.path) !== -1;
+    }
+}
 
-var virtualFiles = {};
-paths.forEach(function (path) {
-    virtualFiles[path] = new VirtualFile([realFiles[path]], function (vf, source, callback) {
+function error(file) {
+    return file instanceof File;
+}
+
+function compile(options) {
+    // TODO: don't compile dependencies
+    return function(file) {
         try {
-            callback(babel.transform(source.content).code);
-        } catch (e) {
+            return new File(file.path, babel.transform(file.contents).code);
+        } catch(e) {
             console.log(e.codeFrame);
-        }
-    });
-});
-
-
-var concatFile = new VirtualFile(
-    paths.map(function (path) { return virtualFiles[path]; }),
-    function(vf, source, callback) {
-        // TODO guarantee that all sources have content first
-        var allContent = vf.sources.every(function(source) {
-            return source.content !== null;
-        });
-        if (allContent) {
-            var content = vf.sources.map(function (source) {
-                return source.content;
-            }).join("\n");
-            callback(content);
+            return e;
         }
     }
-);
+}
 
-concatFile.on("update", function(concatFile) {
-    console.log(concatFile.content);
-    fs.writeFile("test/build/bundle.js", concatFile.content, function (err) {
-        if (!err) {
-            console.log("[BAKE] wrote bundle.js");
+function concat(paths, dest) {
+    var cache = {};
+    return function (file) {
+        cache[file.path] = file;
+        if (_.isEqual(paths, Object.keys(cache))) {
+            var contents = paths.reduce(function (bundle, path) {
+                var file = cache[path];
+                return bundle + file.contents + '\n';
+            }, '');
+            return new File(dest, contents);
         }
+    }
+}
+
+Rx.Observable.prototype.mapFilter = function(mapFn, filterFn) {
+    return this.map(mapFn).filter(filterFn);
+};
+
+Rx.Observable.prototype.transform = function(fn) {
+    return this.mapFilter(fn, error);
+};
+
+Rx.Observable.prototype.pick = function(paths) {
+    return this.filter(pick(paths));
+};
+
+Rx.Observable.prototype.write = function() {
+    return this.map(function (file) {
+        fs.writeFile(file.path, file.contents);
+        return file;
     });
-});
+};
+
+Rx.Observable.prototype.log = function() {
+    return this.map(function (file) {
+        console.log(file.contents);
+        return file;
+    });
+};
+
+Rx.Observable.prototype.drain = function() {
+    this.subscribe(function() {});
+};
 
 watcher
-    .on('add', function(path) {
-        log('File', path, 'has been added');
-    })
-    .on('addDir', function(path) { log('Directory', path, 'has been added'); })
-    .on('change', function(path) {
-        log('File', path, 'has been changed');
-        realFiles[path].update();
-    })
-    .on('unlink', function(path) { log('File', path, 'has been removed'); })
-    .on('unlinkDir', function(path) { log('Directory', path, 'has been removed'); })
-    .on('error', function(error) { log('Error happened', error); })
-    .on('ready', function() { log('Initial scan complete. Ready for changes.'); });
+    .pick(sourcePaths)
+    .transform(compile())
+    .transform(concat(sourcePaths, "test/build/bundle.js"))
+    .log()
+    .write()
+    .drain();
+
+// TODO: run tests
