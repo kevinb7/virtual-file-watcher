@@ -6,13 +6,18 @@ var concat = actions.concat;
 var log = actions.log;
 var write = actions.write;
 
+var babel = require('babel-core');
+
 var sourcePaths = [
     'example/src/test1.js',
     'example/src/test2.js'
 ];
 
 watch(sourcePaths, { debug: true, once: false })
-    .transform(compile({ regex: /^example\/src/ }))
+    .transform(compile({
+        compiler: function (code) { return babel.transform(code).code },
+        regex: /^example\/src/
+    }))
     .transform(concat(sourcePaths, "example/build/bundle.js"))
     .transform(log)
     .transform(write)
