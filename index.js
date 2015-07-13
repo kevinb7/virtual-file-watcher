@@ -11,9 +11,14 @@ function File(path, contents) {
     this.contents = contents;
 }
 
-function watch(dir) {
+var debug = false;
+
+function watch(paths, options) {
+    options = options || {};
+    debug = !!options.debug;
+
     var ee = new EventEmitter();
-    var watcher = chokidar.watch(dir, {
+    var watcher = chokidar.watch(paths, {
         ignored: /[\/\\]\./, persistent: true
     });
 
@@ -25,7 +30,7 @@ function watch(dir) {
             ee.removeListener("update", h);
         });
 
-    watcher.on('add', function(path) {
+    var update = function(path) {
         fs.readFile(path, function(err, data) {
             if (err) {
                 console.error(err);
@@ -33,43 +38,39 @@ function watch(dir) {
             }
             ee.emit("update", new File(path, data.toString('utf-8')));
         });
-    });
+    };
 
-    watcher.on('change', function(path) {
-        fs.readFile(path, function(err, data) {
-            if (err) {
-                console.error(err);
-                return;
-            }
-            ee.emit("update", new File(path, data.toString('utf-8')));
-        });
-    });
+    watcher.on('add', update);
+    watcher.on('change', update);
 
     return observable;
 }
 
-var watcher = watch('example/src');
-var sourcePaths = [
-    'example/src/test1.js',
-    'example/src/test2.js'
-];
+Rx.Observable.prototype.transform = function(fn) {
+    return this.map(fn).filter(function (file) {
+        if (debug) {
+            if (file instanceof Error) {
+                console.log("DEBUG: " + file.message);
+            }
+        }
+        return file instanceof File;
+    });
+};
 
-function pick(files) {
-    return function (file) {
-        return files.indexOf(file.path) !== -1;
-    }
-}
-
-function error(file) {
-    return file instanceof File;
-}
+Rx.Observable.prototype.end = function() {
+    this.subscribe(function() {});
+};
 
 function compile(options) {
-    // TODO: don't compile dependencies
+    options = options || {};
     return function(file) {
+        if (options.regex && !options.regex.test(file.path)) {
+            return file;
+        }
         try {
             return new File(file.path, babel.transform(file.contents).code);
         } catch(e) {
+            console.log("Syntax error in " + file.path);
             console.log(e.codeFrame);
             return e;
         }
@@ -87,45 +88,34 @@ function concat(paths, dest) {
             }, '');
             return new File(dest, contents);
         }
+        return new Error("waiting on dependencies");
     }
 }
 
-Rx.Observable.prototype.mapFilter = function(mapFn, filterFn) {
-    return this.map(mapFn).filter(filterFn);
-};
+function log(file) {
+    console.log("wrote " + file.path);
+    return file;
+}
 
-Rx.Observable.prototype.transform = function(fn) {
-    return this.mapFilter(fn, error);
-};
-
-Rx.Observable.prototype.pick = function(paths) {
-    return this.filter(pick(paths));
-};
-
-Rx.Observable.prototype.write = function() {
-    return this.map(function (file) {
-        fs.writeFile(file.path, file.contents);
-        return file;
+function write(file) {
+    fs.writeFile(file.path, file.contents, function (err) {
+        if (err) {
+            console.log(err);
+        }
     });
-};
+    return file;
+}
 
-Rx.Observable.prototype.log = function() {
-    return this.map(function (file) {
-        console.log(file.contents);
-        return file;
-    });
-};
+var sourcePaths = [
+    'example/src/test1.js',
+    'example/src/test2.js'
+];
 
-Rx.Observable.prototype.drain = function() {
-    this.subscribe(function() {});
-};
-
-watcher
-    .pick(sourcePaths)
-    .transform(compile())
-    .transform(concat(sourcePaths, "test/build/bundle.js"))
-    .log()
-    .write()
-    .drain();
+watch(sourcePaths, { debug: true })
+    .transform(compile({ regex: /^example\/src/ }))
+    .transform(concat(sourcePaths, "example/build/bundle.js"))
+    .transform(log)
+    .transform(write)
+    .end();
 
 // TODO: run tests
