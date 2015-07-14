@@ -1,1 +1,3 @@
-# virtual-file-watcher
+# roux
+
+Functional reactive build system.
